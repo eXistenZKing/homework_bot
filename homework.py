@@ -1,3 +1,4 @@
+from http import HTTPStatus
 import logging
 import os
 import time
@@ -9,12 +10,19 @@ import telegram
 from exceptions import (ExceptionEnvVariable,
                         ExceptionSendMessage,
                         LogsApiAnswer,
-                        ExceptionBotWork)
+                        ExceptionAvailabilityHomework)
 
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+logger.addHandler(handler)
+formatter = logging.Formatter(
+    '%(asctime)s [%(levelname)s] %(message)s'
+)
+handler.setFormatter(formatter)
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
@@ -34,21 +42,17 @@ HOMEWORK_VERDICTS = {
 
 def check_tokens():
     """Проверка доступности переменных окружения."""
-    try:
-        if None in [TELEGRAM_CHAT_ID, PRACTICUM_TOKEN, TELEGRAM_TOKEN]:
-            raise ExceptionEnvVariable
-    except ExceptionEnvVariable as error:
-        error.add_logs()
+    env_tokens = (TELEGRAM_CHAT_ID, PRACTICUM_TOKEN, TELEGRAM_TOKEN)
+    if all(env_tokens):
+        return True
+    else:
+        raise ExceptionEnvVariable
 
 
 def send_message(bot, message):
     """Отправка сообщения в чате об изменении статуса ревью."""
-    try:
-        bot.send_message(TELEGRAM_CHAT_ID, message)
-    except ExceptionSendMessage as error:
-        error.log_error()
-    else:
-        ExceptionSendMessage().log_debug()
+    bot.send_message(TELEGRAM_CHAT_ID, message)
+    logger.debug('Сообщение успешно отправлено в чат Telegram')
 
 
 def get_api_answer(timestamp):
@@ -56,12 +60,11 @@ def get_api_answer(timestamp):
     payload = {'from_date': timestamp}
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
-    except Exception as error:
-        LogsApiAnswer().log_error(error)
+    except requests.RequestException as error:
+        raise LogsApiAnswer(error)
 
-    if response.status_code != 200:
-        error = 'Код ответа страницы отличен от "200"'
-        raise LogsApiAnswer().log_error(error)
+    if response.status_code != HTTPStatus.OK:
+        raise requests.RequestException
 
     response = response.json()
     return response
@@ -78,21 +81,24 @@ def check_response(response):
     elif not isinstance(response['homeworks'], list):
         raise TypeError('Ключ "homeworks" не соответствует типа данных list')
 
-    try:
+    if not response['homeworks'][0]:
+        raise ExceptionAvailabilityHomework
+    else:
         return response['homeworks'][0]
-    except IndexError:
-        return None
 
 
 def parse_status(homework):
     """Парсинг необходимой информации из ответа API."""
+    for key in ['homework_name', 'status']:
+        if key not in homework:
+            message = f'В списке "homeworks" отсутствует ключ "{key}"'
+            raise LogsApiAnswer(message)
+
     if homework['status'] not in HOMEWORK_VERDICTS.keys():
-        error = ('Статус последней отправленной '
-                 'домашней работы не соответствует документации')
-        raise LogsApiAnswer().log_error(error)
-    elif 'homework_name' not in homework:
-        error = 'В списке "homeworks" отсутствует ключ "homework_name"'
-        raise LogsApiAnswer().log_error(error)
+        message = ('Статус последней отправленной '
+                   'домашней работы не соответствует документации')
+        raise LogsApiAnswer(message)
+
     verdict = HOMEWORK_VERDICTS[homework['status']]
     homework_name = homework['homework_name']
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
@@ -100,8 +106,6 @@ def parse_status(homework):
 
 def main():
     """Основная логика работы бота."""
-    check_tokens()
-
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     timestamp = 1704056618
     message_to_chat = ''
@@ -109,19 +113,30 @@ def main():
     while True:
         try:
 
+            check_tokens()
+
             api_answer = get_api_answer(timestamp)
             check = check_response(api_answer)
-            if not check:
-                LogsApiAnswer().log_debug('Список "homeworks" пуст.')
-            elif message_to_chat != parse_status(check):
+            if message_to_chat != parse_status(check):
                 message_to_chat = parse_status(check)
                 send_message(bot, message_to_chat)
             else:
-                LogsApiAnswer().log_debug('Статус последней отправленной '
-                                          'работы на ревью не поменялся.')
+                raise ExceptionSendMessage
 
+        except ExceptionEnvVariable as error:
+            logger.critical(error)
+            exit()
+        except LogsApiAnswer as error:
+            logger.error(error)
+        except ExceptionAvailabilityHomework:
+            logger.error('Список "homeworks" пуст.')
+        except ExceptionSendMessage:
+            logger.debug('Статус последней отправленной '
+                         'работы на ревью не поменялся.')
+        except requests.RequestException:
+            logger.error('Ответ от API не равен коду "200"')
         except Exception as error:
-            ExceptionBotWork().log_error(error)
+            logger.error(error)
 
         time.sleep(RETRY_PERIOD)
 
