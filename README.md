@@ -1,2 +1,2 @@
 # homework_bot
-Before starting work, you need to set environment variables in the .env file!
+Бот для Телеграмма, информирующий об изменениях в статусе проверки задания.
